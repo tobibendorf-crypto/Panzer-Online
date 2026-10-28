@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Strategie-Kern v3 – Config, Basen, Forschung</title>
+<style>
+:root{--bg:#0b0d0f;--card:#14181d;--line:#2a323d;--txt:#c0c7d0;--mut:#6a7a8c;--acc:#00ffcc;--warn:#ffb020}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:13px/1.45 Consolas,'Courier New',monospace;background:var(--bg);color:var(--txt);padding:8px;max-width:760px;margin:0 auto}
+#bar{position:sticky;top:0;background:var(--bg);padding:6px 0;z-index:5;display:flex;flex-wrap:wrap;gap:2px 12px;border-bottom:1px solid var(--line);font-size:12px}
+#bar b{color:#fff}
+#tabs{display:flex;gap:4px;margin:8px 0}
+.tab{flex:1;text-align:center;padding:9px 2px;background:var(--card);border:1px solid var(--line);cursor:pointer}
+.tab.on{border-color:var(--acc);color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--acc);padding:8px;margin-bottom:6px}
+.mut{color:var(--mut);font-size:11px}.acc{color:var(--acc)}
+button{background:#1e2a33;color:var(--txt);border:1px solid var(--acc);padding:7px 11px;font:inherit;cursor:pointer;margin:4px 4px 0 0}
+button:disabled{opacity:.4;border-color:var(--line)}
+button.gold{border-color:var(--warn);color:var(--warn)}
+.pb{height:6px;background:#0b0d0f;margin:5px 0}.pb i{display:block;height:100%;background:var(--acc);width:0}
+select,textarea,input[type=number]{background:#0b0d0f;color:var(--txt);border:1px solid var(--line);font:inherit;padding:5px}
+textarea{width:100%;height:55vh;font-size:11px;margin:6px 0}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}
+.chip{padding:5px 9px;border:1px solid var(--line);cursor:pointer;background:var(--card)}.chip.on{border-color:var(--acc);color:var(--acc)}
+#toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#222;border:1px solid var(--warn);padding:8px 12px;display:none;z-index:9;max-width:90vw}
+</style></head><body>
+<div id="bar"></div>
+<div id="tabs">
+ <div class="tab" data-t="bases" onclick="go('bases')">Basen</div>
+ <div class="tab" data-t="research" onclick="go('research')">Forschung</div>
+ <div class="tab" data-t="units" onclick="go('units')">Truppen</div>
+ <div class="tab" data-t="map" onclick="go('map')">Karte</div>
+ <div class="tab" data-t="admin" onclick="go('admin')">Admin</div>
+</div>
+<div id="view"></div><div id="toast"></div>
+
+<script>
+/* =====================================================================
+   1. CONFIG – hier (oder live im Admin-Tab) trägst du ALLE Werte ein.
+   Zeiten in Sekunden. Der Code unten enthält keine Spielwerte.
+   ===================================================================== */
+const DEFAULT_CONFIG = {
+  rules: {
+    gameSpeed: 1,                 // Zeitraffer für Tests (10 = alles 10x schneller)
+    empireExponent: 0.5,          // Degressiv: Gesamtertrag = Basen^exp. 0.5 → 100 Basen ≙ 10 volle Basen
+    skip: { goldPerHour: 20, exponent: 1, min: 1 }, // Skip-Gold = goldPerHour * (Restzeit in h)^exponent
+    startBases: [ { types: ["heimat"], levels: { kraftwerk: 1, militaer: 1 } } ],
+    // PHASE 2: Karte, Eroberung, Nachschub, Marsch (Kartenwerte wirken nach Neuladen)
+    map: {
+      size:1400, totalBases:4000, seed:1910,
+      allyCount:300, enemyCount:1400,                  // Rest = neutral
+      typeWeights:{normal:55,flughafen:14,heli:10,zug:10}, harborChance:0.12,
+      newbieCount:40, maxNewbieConquests:4,            // markierte Neulingsbasen / Limit pro Spieler
+      supplyRadius:140, supplyLinePenalty:0.5,         // max. Abstand im Nachschubnetz / Ertragsmalus bei Cut-off
+      fuelResource:"kraftstoff", baseSpeed:2,          // Marschtempo Felder/s (pro Einheit überschreibbar: "speed")
+      droneBaseCount:60, droneSpawnDelayH:12, droneTag:"drohne", // Drohnenbasen erscheinen nach der 1. Drohnen-Forschung; 12 h später neue Karte
+      serverId:"S1",                                   // Kennung in der Statuszeile unter der Karte
+      riverCount:4, roadCount:160, riverPenalty:0.5,   // Gelände: Marschzeit × (1 + Penalty je Flussüberquerung ohne Gate)
+      enemyGarrison:{ pool:["pz_leicht_1918","pz_mittel_1940"], min:3, max:12, baseHp:1500, baseDmg:30 }, // Besatzung feindlicher Basen
+      colors:{ bg:"#050709", grid:"#10161d", neutral:"#7a5c3a", own:"#00ff66", ally:"#3b8cff", enemy:"#b04ad9", newbie:"#ff3b3b", drone:"#ffb020", river:"#2b6a99", road:"#56616e", gate:"#ffd23b" }
+    }
+  },
+  // Welcher Ziel-Typ (für den 7-fach-Bonus) gehört zu welchem Einheiten-Tag?
+  tagKind: { pz_leicht:"panzer", pz_mittel:"panzer", pz_schwer:"panzer", pz_ultra:"panzer", flugzeug:"flugzeug", heli:"heli", schiff:"schiff", zug:"zug", drohne:"drohne" },
+  // Forschung ohne Einheit (requires:["*"] = alle Einheiten-Forschungen abgeschlossen)
+  techs: {
+    turm_kapitel: { name:"Abwehrtürme: Endgame-Kapitel (Stufe 10+)", year:2000, research:{ cost:{stahl:30000,beton:30000,aluminium:30000}, timeS:604800, requires:["*"] } }
+  },
+  targets: { panzer:"Panzer", flugzeug:"Flugzeug", heli:"Heli", schiff:"Schiff", zug:"Zug", drohne:"Drohne", basis:"Basis" },
+
+  // rate = Ertrag pro Basis und Sekunde (vor Gebäude-Boni und Degressiv-Malus)
+  resources: {
+    stahl:      { name:"Stahl",      start:1500, rate:15 },
+    beton:      { name:"Beton",      start:1200, rate:12 },
+    aluminium:  { name:"Aluminium",  start:800,  rate:8  },
+    kraftstoff: { name:"Kraftstoff", start:1000, rate:10 },
+    gold:       { name:"Gold",       start:100,  rate:0.01 }
+  },
+
+  // 7 Basentypen. allows = Einheiten-Tags, die hier gebaut werden dürfen.
+  // combo:true = Zusatztyp (Hafen), wird mit einem Haupttyp kombiniert → Tags beider Typen.
+  baseTypes: {
+    heimat:    { name:"Heimatbasis",    allows:["pz_leicht","pz_mittel"] },
+    normal:    { name:"Normale Basis",  allows:["pz_mittel","pz_schwer"] },
+    flughafen: { name:"Flughafenbasis", allows:["flugzeug","pz_mittel","pz_schwer"] },
+    heli:      { name:"Helibasis",      allows:["heli","pz_schwer","pz_ultra"] },
+    hafen:     { name:"Hafen",          allows:["schiff"], combo:true },
+    zug:       { name:"Zugbasis",       allows:["zug","pz_mittel","pz_schwer"] },
+    drohne:    { name:"Drohnenbasis",   allows:["drohne"] }
+  },
+
+  // Gebäude pro Basis, Stufe 0..max. Kosten/Zeit pro Stufe = Basis * Wachstum^aktuelleStufe.
+  // perLevel: energy / mil (Kapazität) oder boost:{ressource: +Anteil}
+  buildings: {
+    kraftwerk:  { name:"Energie-Zentrale",   max:30, cost:{stahl:50,beton:80},     costGrowth:1.18, timeS:20, timeGrowth:1.15, perLevel:{energy:100} },
+    militaer:   { name:"Militär-Kapazität",  max:30, cost:{beton:80,aluminium:20}, costGrowth:1.18, timeS:20, timeGrowth:1.15, perLevel:{mil:100} },
+    mine_stahl: { name:"Stahlmine",          max:30, cost:{beton:60,stahl:30},     costGrowth:1.2,  timeS:30, timeGrowth:1.15, perLevel:{boost:{stahl:0.1}} },
+    mine_beton: { name:"Betonwerk",          max:30, cost:{stahl:60},              costGrowth:1.2,  timeS:30, timeGrowth:1.15, perLevel:{boost:{beton:0.1}} },
+    mine_alu:   { name:"Aluminiumhütte",     max:30, cost:{stahl:60,beton:60},     costGrowth:1.2,  timeS:30, timeGrowth:1.15, perLevel:{boost:{aluminium:0.1}} },
+    raffinerie: { name:"Raffinerie",         max:30, cost:{stahl:100,beton:100},   costGrowth:1.2,  timeS:40, timeGrowth:1.15, perLevel:{boost:{kraftstoff:0.1}} },
+    // Abwehrturm: Kosten in Gold pro Basis; ab Stufe gate.level muss die Forschung gate.tech fertig sein
+    abwehrturm: { name:"Abwehrturm", max:30, cost:{gold:2}, costGrowth:1.25, timeS:60, timeGrowth:1.12, perLevel:{def:50}, gate:{level:10, tech:"turm_kapitel"} }
+  },
+
+  // Einheiten (Reihenfolge der bonus-Keys = targets). Forschung: research.{cost,timeS,requires}
+  units: {
+    pz_leicht_1918: { name:"Leichter Panzer Mk I", year:1918, tag:"pz_leicht", cost:{stahl:40}, timeS:20, hp:60, dmg:10, bonus:{panzer:1,flugzeug:0.2,heli:0.2,schiff:0.5,zug:1,drohne:0.2,basis:0.5}, range:2, vision:3, cooldownS:2, fuel:1, energy:2, mil:5, research:{cost:{stahl:100},timeS:60,requires:[]} },
+    pz_mittel_1940: { name:"Mittlerer Panzer", year:1940, tag:"pz_mittel", cost:{stahl:120,kraftstoff:30}, timeS:45, hp:200, dmg:40, bonus:{panzer:1.2,flugzeug:0.2,heli:0.3,schiff:0.6,zug:1.2,drohne:0.2,basis:0.8}, range:3, vision:3, cooldownS:3, fuel:1.5, energy:8, mil:12, research:{cost:{stahl:600,beton:300},timeS:900,requires:["pz_leicht_1918"]} },
+    pz_schwer_1944: { name:"Schwerer Panzer", year:1944, tag:"pz_schwer", cost:{stahl:300,aluminium:40,kraftstoff:60}, timeS:90, hp:500, dmg:110, bonus:{panzer:1.5,flugzeug:0.1,heli:0.2,schiff:0.8,zug:1.3,drohne:0.1,basis:1.2}, range:4, vision:3, cooldownS:4, fuel:2.5, energy:20, mil:30, research:{cost:{stahl:3000,aluminium:800},timeS:7200,requires:["pz_mittel_1940"]} },
+    pz_ultra_1957:  { name:"Ultraschwerer Panzer", year:1957, tag:"pz_ultra", cost:{stahl:800,beton:200,kraftstoff:150}, timeS:180, hp:1400, dmg:260, bonus:{panzer:1.8,flugzeug:0,heli:0.1,schiff:1,zug:1.5,drohne:0,basis:2}, range:5, vision:3, cooldownS:6, fuel:5, energy:45, mil:70, research:{cost:{stahl:12000,beton:4000},timeS:43200,requires:["pz_schwer_1944"]} },
+    jaeger_1944:    { name:"Jagdflugzeug", year:1944, tag:"flugzeug", cost:{aluminium:120,kraftstoff:90}, timeS:60, hp:180, dmg:70, bonus:{panzer:0.5,flugzeug:2,heli:1.5,schiff:0.6,zug:0.6,drohne:1.5,basis:0.4}, range:6, vision:8, cooldownS:3, fuel:3, energy:20, mil:22, research:{cost:{aluminium:1800,stahl:900},timeS:14400,requires:["pz_mittel_1940"]} },
+    zug_1941:       { name:"Panzerzug", year:1941, tag:"zug", cost:{stahl:250,beton:100,kraftstoff:60}, timeS:75, hp:450, dmg:50, bonus:{panzer:1,flugzeug:0.3,heli:0.3,schiff:0.5,zug:1.5,drohne:0.2,basis:1}, range:4, vision:3, cooldownS:4, fuel:1, energy:18, mil:25, research:{cost:{stahl:1500,beton:800},timeS:7200,requires:["pz_mittel_1940"]} },
+    zerstoerer_1942:{ name:"Zerstörer", year:1942, tag:"schiff", cost:{stahl:300,aluminium:60,kraftstoff:100}, timeS:100, hp:600, dmg:90, bonus:{panzer:0.8,flugzeug:0.8,heli:0.6,schiff:1.6,zug:0.5,drohne:0.5,basis:1.4}, range:6, vision:5, cooldownS:4, fuel:2, energy:30, mil:40, research:{cost:{stahl:4500,aluminium:2000},timeS:43200,requires:["pz_mittel_1940"]} },
+    heli_1965:      { name:"Kampfhubschrauber", year:1965, tag:"heli", cost:{aluminium:200,kraftstoff:120,stahl:60}, timeS:120, hp:300, dmg:95, bonus:{panzer:1.6,flugzeug:0.4,heli:1.2,schiff:0.8,zug:1,drohne:0.8,basis:0.6}, range:4, vision:6, cooldownS:3, fuel:3.5, energy:35, mil:40, research:{cost:{aluminium:6000,stahl:3000},timeS:86400,requires:["jaeger_1944"]} },
+    flak_2000:      { name:"Anti-Drohnen-Panzer", year:2000, tag:"pz_mittel", cost:{stahl:200,aluminium:150,kraftstoff:50}, timeS:80, hp:220, dmg:35, bonus:{panzer:0.3,flugzeug:1,heli:1,schiff:0,zug:0,drohne:6,basis:0.2}, range:5, vision:6, cooldownS:1, fuel:1.5, energy:25, mil:20, research:{cost:{aluminium:9000,stahl:6000},timeS:129600,requires:["heli_1965"]} },
+    drohne_2000:    { name:"Kampfdrohne", year:2000, tag:"drohne", cost:{aluminium:250,kraftstoff:60}, timeS:90, hp:90, dmg:120, bonus:{panzer:1.5,flugzeug:0.5,heli:0.5,schiff:1,zug:1.2,drohne:1,basis:1}, range:5, vision:7, cooldownS:3, fuel:2, energy:30, mil:15, research:{cost:{aluminium:20000,gold:40},timeS:172800,requires:["heli_1965"]} }
+  }
+};
+
+/* =====================================================================
+   2. CONFIG LADEN / PRÜFEN  (Admin-Änderungen werden im Browser gespeichert)
+   ===================================================================== */
+function validate(c){
+  const e=[]; if(!c||!c.rules||!c.rules.map||!c.resources||!c.baseTypes||!c.buildings||!c.units) return ["Config unvollständig (rules/resources/baseTypes/buildings/units)"];
+  const rs=Object.keys(c.resources), tags=new Set(Object.values(c.baseTypes).flatMap(t=>t.allows||[]));
+  const chk=(o,w)=>{for(const k in o||{}) if(!rs.includes(k)) e.push(`${w}: unbekannte Ressource "${k}"`);};
+  for(const [id,u] of Object.entries(c.units)){
+    chk(u.cost,id); chk(u.research?.cost,id+" (Forschung)");
+    if(!tags.has(u.tag)) e.push(`${id}: Tag "${u.tag}" wird von keinem Basistyp gebaut`);
+    for(const r of u.research?.requires||[]) if(r!=="*"&&!c.units[r]&&!c.techs?.[r]) e.push(`${id}: Voraussetzung "${r}" existiert nicht`);
+  }
+  for(const [id,t] of Object.entries(c.techs||{})) chk(t.research?.cost,id);
+  for(const [id,b] of Object.entries(c.buildings)) chk(b.cost,id);
+  return e;
+}
+function loadCfg(){
+  try{ const s=localStorage.getItem("strategie_cfg_v3"); if(s){const c=JSON.parse(s); if(!validate(c).length) return c;} }catch(e){}
+  return structuredClone(DEFAULT_CONFIG);
+}
+let CFG=loadCfg();
+
+/* =====================================================================
+   3. SPIELZUSTAND
+   ===================================================================== */
+const PLAYER={id:"p1",isAdmin:true}; // NUR UI-Schalter. Echte Absicherung des Admin-Tabs muss serverseitig passieren.
+const S={res:{},bases:[],research:{},units:{},sel:0,tab:"bases",dirty:true,nextId:1,mapNo:1,clock:0,droneAt:null,newMapReady:false,marches:[],target:null,send:{},conquered:0};
+const mkBase=(types,levels,x=CFG.rules.map.size/2,y=CFG.rules.map.size/2,mapId=0)=>({id:S.nextId++,types,lvl:{...levels},job:null,queue:[],x,y,mapId,cut:false});
+function syncCfg(){ // neue Einheiten/Ressourcen aus der Config in den State übernehmen
+  for(const r in CFG.resources) S.res[r]??=CFG.resources[r].start;
+  for(const id in CFG.units){ S.research[id]??={done:false,prog:0,active:false}; S.units[id]??=0; }
+  for(const id in CFG.techs||{}) S.research[id]??={done:false,prog:0,active:false};
+}
+let MAP=[];
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y), FR=()=>CFG.rules.map.fuelResource;
+let TER={rivers:[],roads:[],gates:[]},LAYER=null,mapDirty=true;
+function rngFor(seed){let a=seed>>>0;return()=>{a=(a+0x6D2B79F5)>>>0;let t=a;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;};}
+const mapSeed=()=>CFG.rules.map.seed+(S.mapNo-1)*7919;
+const segHit=(p,q,r,s)=>{const d=(q.x-p.x)*(s.y-r.y)-(q.y-p.y)*(s.x-r.x); if(!d) return null;
+  const t=((r.x-p.x)*(s.y-r.y)-(r.y-p.y)*(s.x-r.x))/d,u=((r.x-p.x)*(q.y-p.y)-(r.y-p.y)*(q.x-p.x))/d;
+  return t>=0&&t<=1&&u>=0&&u<=1?{x:p.x+t*(q.x-p.x),y:p.y+t*(q.y-p.y)}:null;};
+function genMap(){ // Basen + Gelände deterministisch per Seed
+  const m=CFG.rules.map,rnd=rngFor(mapSeed()),W=m.size;
+  const tw=Object.entries(m.typeWeights),tot=tw.reduce((x,[,w])=>x+w,0);
+  const pick=()=>{let r=rnd()*tot;for(const[k,w]of tw){if((r-=w)<0)return k;}return tw[0][0];};
+  MAP=[{id:0,x:W/2,y:W/2,types:["heimat"],owner:"p1",newbie:false}];
+  for(let i=1;i<m.totalBases;i++){const t=[pick()]; if(rnd()<m.harborChance) t.push("hafen");
+    MAP.push({id:i,x:Math.floor(rnd()*W),y:Math.floor(rnd()*W),types:t,owner:i<=m.allyCount?"ally":i<=m.allyCount+m.enemyCount?"enemy":"neutral",newbie:false});}
+  MAP.filter(b=>b.owner==="neutral").sort((p,q)=>dist(p,MAP[0])-dist(q,MAP[0])).slice(0,m.newbieCount).forEach(b=>b.newbie=true);
+  TER={rivers:[],roads:[],gates:[]};
+  for(let i=0;i<m.riverCount;i++){const vert=rnd()<.5,a=rnd()*W,pts=[]; // Flüsse: geschwungener Pfad von Kante zu Kante
+    for(let j=0;j<=12;j++){const t=j/12*W,off=a+Math.sin(j*.9+i)*W*.08+(rnd()-.5)*W*.06; pts.push(vert?{x:off,y:t}:{x:t,y:off});} TER.rivers.push(pts);}
+  for(let i=0;i<m.roadCount;i++){const a=MAP[1+Math.floor(rnd()*(MAP.length-1))]; let b=null,bd=1e9; // Straßen: Basis → nahe Basis
+    for(let k=0;k<12;k++){const c=MAP[Math.floor(rnd()*MAP.length)],d=dist(a,c); if(c!==a&&d>20&&d<bd){bd=d;b=c;}}
+    if(!b||bd>260) continue;
+    TER.roads.push([{x:a.x,y:a.y},{x:(a.x+b.x)/2+(rnd()-.5)*bd*.4,y:(a.y+b.y)/2+(rnd()-.5)*bd*.4},{x:b.x,y:b.y}]);}
+  for(const rd of TER.roads) for(let i=0;i<2;i++) for(const rv of TER.rivers) for(let j=0;j<rv.length-1;j++){ // Gates = Straße kreuzt Fluss
+    const h=segHit(rd[i],rd[i+1],rv[j],rv[j+1]); if(h) TER.gates.push(h);}
+  mapDirty=true;
+}
+function crossings(a,b){ // Flussüberquerungen ohne Gate in der Nähe
+  let n=0; for(const rv of TER.rivers) for(let j=0;j<rv.length-1;j++){const h=segHit(a,b,rv[j],rv[j+1]); if(h&&!TER.gates.some(g=>Math.hypot(g.x-h.x,g.y-h.y)<25)) n++;}
+  return n;
+}
+function garrison(t){ // Besatzung feindlicher Basen, deterministisch erzeugt
+  if(t.gar) return t.gar; const g=CFG.rules.map.enemyGarrison,r=rngFor(mapSeed()+t.id*131);
+  return t.gar={units:{[g.pool[Math.floor(r()*g.pool.length)]]:g.min+Math.floor(r()*(g.max-g.min+1))},hp:g.baseHp,dmg:g.baseDmg};
+}
+function battle(att,def,bHp,bDmg){ // Rundenkampf mit 7-fach-Bonus: Schaden = dmg × bonus[Zieltyp]; Schaden verteilt sich gleichmäßig auf alle Ziele
+  const mk=o=>Object.entries(o).filter(([,n])=>n>0).map(([id,n])=>{const u=CFG.units[id];return{id,u,n,each:u.hp,hp:u.hp*n,k:CFG.tagKind[u.tag]||"panzer"};});
+  const A=mk(att),D=mk(def),base={id:"basis",u:{dmg:bDmg,bonus:{}},n:1,each:bHp,hp:bHp,k:"basis"},T=[...D,base];
+  const hit=(from,to)=>{const tg=to.filter(x=>x.hp>0),r=new Map(); if(!tg.length) return r;
+    from.filter(x=>x.hp>0).forEach(g=>tg.forEach(x=>r.set(x,(r.get(x)||0)+g.n*g.u.dmg/tg.length*((g.u.bonus||{})[x.k]??1)))); return r;};
+  let rounds=0;
+  while(rounds++<300&&A.some(g=>g.hp>0)&&T.some(g=>g.hp>0)){
+    const dA=hit(A,T),dD=hit(T,A); dA.forEach((v,x)=>x.hp-=v); dD.forEach((v,x)=>x.hp-=v);
+    [...A,...T].forEach(g=>g.n=Math.max(0,Math.ceil(g.hp/g.each)));
+  }
+  return {win:!T.some(g=>g.hp>0)&&A.some(g=>g.hp>0),left:Object.fromEntries(A.map(g=>[g.id,g.hp>0?g.n:0])),rounds};
+}
+function onResearched(id){ // 1. Drohnen-Forschung → Drohnenbasen erscheinen, Timer für neue Karte startet
+  const m=CFG.rules.map; if(CFG.units[id]?.tag!==m.droneTag||S.droneAt!==null) return;
+  S.droneAt=S.clock; const rnd=rngFor(mapSeed()+999);
+  for(let i=0;i<m.droneBaseCount;i++) MAP.push({id:MAP.length,x:Math.floor(rnd()*m.size),y:Math.floor(rnd()*m.size),types:["drohne"],owner:"neutral",newbie:false,drone:true});
+  mapDirty=true; toast(`Drohnenbasen erschienen – in ${m.droneSpawnDelayH} h öffnet eine neue Karte`);
+}
+function newMap(){ // neue Karte: Basen/Märsche zurück auf Start, Forschung/Rohstoffe/Einheiten bleiben
+  S.mapNo++; S.droneAt=null; S.newMapReady=false; S.bases=[]; S.nextId=1; S.marches=[]; S.target=null; S.conquered=0; S.sel=0;
+  CFG.rules.startBases.forEach(b=>S.bases.push(mkBase(b.types,b.levels||{}))); genMap(); calcSupply(); render();
+}
+function calcSupply(){ // Nachschubnetz: alles, was über Ketten ≤ supplyRadius mit einer Heimatbasis verbunden ist, ist versorgt
+  const R=CFG.rules.map.supplyRadius,q=S.bases.filter(b=>b.types.includes("heimat")),seen=new Set(q);
+  for(let i=0;i<q.length;i++) S.bases.forEach(o=>{if(!seen.has(o)&&dist(q[i],o)<=R){seen.add(o);q.push(o);}});
+  S.bases.forEach(b=>b.cut=!seen.has(b));
+}
+CFG.rules.startBases.forEach(b=>S.bases.push(mkBase(b.types,b.levels||{}))); syncCfg(); genMap(); calcSupply();
+
+/* =====================================================================
+   4. HILFSFUNKTIONEN
+   ===================================================================== */
+const fmt=s=>s<60?`${Math.ceil(s)}s`:s<3600?`${Math.floor(s/60)}m ${Math.floor(s%60)}s`:s<172800?`${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`:`${Math.floor(s/86400)}d ${Math.floor(s%86400/3600)}h`;
+const rn=r=>CFG.resources[r]?.name||r;
+const bn=b=>b.types.map(t=>CFG.baseTypes[t]?.name||t).join(" + ");
+const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+const costStr=c=>Object.entries(c||{}).map(([k,v])=>`${Math.ceil(v)} ${rn(k)}`).join(", ")||"gratis";
+const can=c=>Object.entries(c||{}).every(([k,v])=>(S.res[k]||0)>=Math.ceil(v));
+const pay=c=>{for(const k in c) S.res[k]-=Math.ceil(c[k]);};
+const B=()=>S.bases[S.sel]||S.bases[0];
+const RD=id=>(CFG.units[id]||CFG.techs?.[id])?.research, NM=id=>(CFG.units[id]||CFG.techs?.[id])?.name||id;
+const reqOk=r=>r.requires.every(x=>x==="*"?Object.keys(CFG.units).every(i=>S.research[i]?.done):S.research[x]?.done);
+const gateLock=(bd,l)=>bd.gate&&l+1>=bd.gate.level&&!S.research[bd.gate.tech]?.done?`<br>🔒 ab Stufe ${bd.gate.level}: Forschung „${NM(bd.gate.tech)}“`:"";
+const allowedTags=b=>new Set(b.types.flatMap(t=>CFG.baseTypes[t]?.allows||[]));
+const empireFactor=()=>Math.pow(S.bases.length,CFG.rules.empireExponent-1); // Ertragsfaktor pro Basis
+const sumEffect=k=>S.bases.reduce((a,b)=>a+Object.entries(b.lvl).reduce((x,[id,l])=>x+(CFG.buildings[id]?.perLevel?.[k]||0)*l,0),0);
+const boost=(b,r)=>1+Object.entries(b.lvl).reduce((x,[id,l])=>x+(CFG.buildings[id]?.perLevel?.boost?.[r]||0)*l,0);
+const lvlCost=(bd,l)=>Object.fromEntries(Object.entries(bd.cost).map(([k,v])=>[k,v*Math.pow(bd.costGrowth,l)]));
+const lvlTime=(bd,l)=>bd.timeS*Math.pow(bd.timeGrowth,l);
+const skipCost=rem=>{const s=CFG.rules.skip;return Math.max(s.min,Math.ceil(s.goldPerHour*Math.pow(rem/3600,s.exponent)));};
+function usage(){ // Kapazität zählt fertige Einheiten UND Einheiten in der Warteschlange
+  let e=0,m=0;
+  for(const id in S.units){const u=CFG.units[id]; if(u){e+=(u.energy||0)*S.units[id]; m+=(u.mil||0)*S.units[id];}}
+  S.bases.forEach(b=>b.queue.forEach(q=>{const u=CFG.units[q.id]; if(u){e+=u.energy||0; m+=u.mil||0;}}));
+  S.marches.forEach(mc=>{for(const id in mc.units){const u=CFG.units[id]; if(u){e+=(u.energy||0)*mc.units[id]; m+=(u.mil||0)*mc.units[id];}}});
+  return {e,m};
+}
+let tt; function toast(m){const t=document.getElementById("toast");t.textContent=m;t.style.display="block";clearTimeout(tt);tt=setTimeout(()=>t.style.display="none",2200);}
+
+/* =====================================================================
+   5. TICK-LOGIK (Produktion, Bau, Rekrutierung, Forschung)
+   ===================================================================== */
+function tick(dt){
+  const f=empireFactor();
+  S.clock+=dt; if(S.droneAt!==null&&!S.newMapReady&&S.clock-S.droneAt>=CFG.rules.map.droneSpawnDelayH*3600){S.newMapReady=true;S.dirty=true;}
+  S.marches=S.marches.filter(mc=>{mc.t+=dt; if(mc.t>=mc.total){arrive(mc);return false;} return true;});
+  const cutF=1-CFG.rules.map.supplyLinePenalty; // abgeschnittene Basen produzieren weniger
+  for(const r in CFG.resources){ let g=0; S.bases.forEach(b=>g+=CFG.resources[r].rate*boost(b,r)*(b.cut?cutF:1)); S.res[r]+=g*f*dt; }
+  S.bases.forEach(b=>{
+    if(b.job){b.job.t+=dt; if(b.job.t>=b.job.total){b.lvl[b.job.id]=(b.lvl[b.job.id]||0)+1; b.job=null; S.dirty=true;}}
+    if(b.queue[0]){const q=b.queue[0]; q.t+=dt; if(q.t>=q.total){S.units[q.id]=(S.units[q.id]||0)+1; b.queue.shift(); S.dirty=true;}}
+  });
+  for(const id in S.research){const r=S.research[id]; if(!r.active) continue; const need=RD(id)?.timeS;
+    if(need==null){r.active=false;continue;} r.prog+=dt; if(r.prog>=need){r.active=false;r.done=true;S.dirty=true;onResearched(id);}}
+}
+
+/* =====================================================================
+   6. AKTIONEN
+   ===================================================================== */
+function build(id){
+  const b=B(),bd=CFG.buildings[id],l=b.lvl[id]||0;
+  if(b.job) return toast("Diese Basis baut bereits");
+  if(l>=bd.max) return; if(gateLock(bd,l)) return toast("Erst die Forschung dafür abschließen"); const c=lvlCost(bd,l); if(!can(c)) return toast("Nicht genug Rohstoffe");
+  pay(c); b.job={id,t:0,total:lvlTime(bd,l)}; render();
+}
+function research(id){
+  const d=RD(id),r=S.research[id]; if(r.done) return;
+  if(Object.values(S.research).some(x=>x.active)) return toast("Es läuft bereits eine Forschung");
+  if(!reqOk(d)) return toast("Voraussetzung fehlt");
+  if(!can(d.cost)) return toast("Nicht genug Rohstoffe");
+  pay(d.cost); r.active=true; r.prog=0; render();
+}
+function recruit(id){
+  const b=B(),u=CFG.units[id];
+  if(!S.research[id].done) return toast("Noch nicht erforscht");
+  if(!allowedTags(b).has(u.tag)) return toast("Dieser Basistyp kann das nicht bauen");
+  if(!can(u.cost)) return toast("Nicht genug Rohstoffe");
+  const us=usage(); if(us.e+(u.energy||0)>sumEffect("energy")||us.m+(u.mil||0)>sumEffect("mil")) return toast("Energie oder Militär-Kapazität erschöpft");
+  pay(u.cost); b.queue.push({id,t:0,total:u.timeS}); render();
+}
+const sendUnits=()=>Object.fromEntries(Object.entries(S.send).filter(([id,n])=>n>0&&S.units[id]>0).map(([id,n])=>[id,Math.min(n,S.units[id])]));
+const fuelCost=(u,d)=>Object.entries(u).reduce((a,[id,n])=>a+(CFG.units[id].fuel||0)*d*n,0); // Kraftstoff = Verbrauch/Feld × Distanz × Anzahl
+function canConquer(t){ // liefert Fehltext oder null
+  const m=CFG.rules.map;
+  if(t.owner==="p1") return "Gehört dir bereits";
+  if(t.owner==="ally") return "Verbündete Basen kannst du nicht angreifen";
+  if(t.newbie&&S.conquered>=m.maxNewbieConquests) return `Neulingsbasen-Limit (${m.maxNewbieConquests}) erreicht`;
+  return null;
+}
+function arrive(mc){ // Trupp trifft ein: neutrale Basis → übernehmen, feindliche → Kampf; Überlebende kehren in den Pool zurück
+  const t=MAP[mc.to],err=canConquer(t),back=o=>{for(const id in o) S.units[id]+=o[id];};
+  if(err){back(mc.units);toast("Marsch beendet: "+err);S.dirty=true;return;}
+  if(t.owner==="enemy"){
+    const g=garrison(t),r=battle(mc.units,g.units,g.hp,g.dmg);
+    const lost=Object.entries(mc.units).map(([id,n])=>[id,n-(r.left[id]||0)]).filter(([,d])=>d>0).map(([id,d])=>`${d}× ${CFG.units[id].name}`).join(", ")||"keine";
+    back(r.left); S.dirty=true;
+    if(!r.win){toast(`Angriff auf #${t.id} gescheitert (${r.rounds} Runden). Verluste: ${lost}`);return;}
+    toast(`#${t.id} erobert · Verluste: ${lost}`);
+  } else {back(mc.units); toast(`Basis #${t.id} erobert`);}
+  t.owner="p1"; if(t.newbie){S.conquered++;t.newbie=false;}
+  S.bases.push(mkBase(t.types,{},t.x,t.y,t.id)); calcSupply(); mapDirty=true; S.dirty=true;
+}
+function dispatch(){
+  const t=MAP[S.target],b=B(); if(!t) return toast("Erst ein Ziel auf der Karte antippen");
+  const err=canConquer(t); if(err) return toast(err);
+  if(S.marches.some(m=>m.to===t.id)) return toast("Auf dieses Ziel ist schon ein Trupp unterwegs");
+  const u=sendUnits(),ids=Object.keys(u); if(!ids.length) return toast("Keine Einheiten gewählt");
+  const d=dist(b,t),fuel=Math.ceil(fuelCost(u,d)); if((S.res[FR()]||0)<fuel) return toast(`${rn(FR())} fehlt: ${fuel} nötig`);
+  S.res[FR()]-=fuel; ids.forEach(id=>S.units[id]-=u[id]);
+  const sp=Math.min(...ids.map(id=>CFG.units[id].speed||CFG.rules.map.baseSpeed));
+  S.marches.push({id:S.nextId++,to:t.id,units:u,t:0,total:d*(1+CFG.rules.map.riverPenalty*crossings(b,t))/sp,fx:b.x,fy:b.y}); S.send={}; render();
+}
+function pickBase(e){
+  const c=e.currentTarget,r=c.getBoundingClientRect(),k=CFG.rules.map.size/r.width,x=(e.clientX-r.left)*k,y=(e.clientY-r.top)*k;
+  let best=null,bd=(16*k)**2; for(const b of MAP){const d=(b.x-x)**2+(b.y-y)**2; if(d<bd){bd=d;best=b;}}
+  S.target=best?best.id:null; render();
+}
+function onSend(id,v){S.send[id]=Math.max(0,parseInt(v)||0); updSend();}
+function updSend(){
+  const e=document.getElementById("sendinfo"),t=MAP[S.target]; if(!e||!t) return;
+  const u=sendUnits(),ids=Object.keys(u),d=dist(B(),t),sp=ids.length?Math.min(...ids.map(id=>CFG.units[id].speed||CFG.rules.map.baseSpeed)):0;
+  e.textContent=`Distanz ${d.toFixed(0)} Felder · ${rn(FR())}: ${Math.ceil(fuelCost(u,d))} nötig (${Math.floor(S.res[FR()]||0)} da)`+(sp?` · Dauer ${fmt(d*(1+CFG.rules.map.riverPenalty*crossings(B(),t))/sp)} (${crossings(B(),t)} Flussüberquerungen ohne Gate)`:"");
+}
+function mapMove(e){ // Statuszeile: Server/Map-Kennung + Live-Mauskoordinaten
+  const c=e.currentTarget,r=c.getBoundingClientRect(),k=CFG.rules.map.size/r.width,el=document.getElementById("mapstat");
+  if(el) el.textContent=`${CFG.rules.map.serverId} MAP ${String(S.mapNo).padStart(3,"0")} · ${Math.round((e.clientX-r.left)*k)}:${Math.round((e.clientY-r.top)*k)}`;
+}
+function drawMap(){ // statische Ebene (Raster, Gelände, Basen) wird gecacht und nur bei Änderungen neu gebaut
+  const c=document.getElementById("map"); if(!c) return;
+  const m=CFG.rules.map,k=c.width/m.size,col=m.colors;
+  if(mapDirty||!LAYER){
+    LAYER=document.createElement("canvas"); LAYER.width=c.width; LAYER.height=c.height; const g=LAYER.getContext("2d");
+    g.fillStyle=col.bg; g.fillRect(0,0,c.width,c.height);
+    g.strokeStyle=col.grid; g.lineWidth=1; g.beginPath(); for(let v=0;v<=m.size;v+=100){g.moveTo(v*k,0);g.lineTo(v*k,c.height);g.moveTo(0,v*k);g.lineTo(c.width,v*k);} g.stroke();
+    const curve=(pts,color,w)=>{g.strokeStyle=color;g.lineWidth=w;g.beginPath();g.moveTo(pts[0].x*k,pts[0].y*k);
+      for(let i=1;i<pts.length-1;i++) g.quadraticCurveTo(pts[i].x*k,pts[i].y*k,(pts[i].x+pts[i+1].x)/2*k,(pts[i].y+pts[i+1].y)/2*k);
+      const l=pts[pts.length-1]; g.lineTo(l.x*k,l.y*k); g.stroke();};
+    TER.roads.forEach(p=>curve(p,col.road,1)); TER.rivers.forEach(p=>curve(p,col.river,1.6));
+    g.strokeStyle=col.gate; g.lineWidth=1.2; TER.gates.forEach(h=>g.strokeRect(h.x*k-3,h.y*k-3,6,6));
+    const groups={};
+    for(const b of MAP){const key=b.owner==="p1"?"own":b.owner==="ally"?"ally":b.owner==="enemy"?"enemy":b.drone?"drone":b.newbie?"newbie":"neutral"; (groups[key]??=[]).push(b);}
+    for(const key in groups){g.fillStyle=col[key]; g.beginPath(); const r=key==="own"?4:key==="newbie"?3.2:2.4;
+      for(const b of groups[key]){g.moveTo(b.x*k+r,b.y*k); g.arc(b.x*k,b.y*k,r,0,6.2832);} g.fill();}
+    mapDirty=false;
+  }
+  const g=c.getContext("2d"); g.drawImage(LAYER,0,0);
+  g.lineWidth=1; g.strokeStyle="rgba(0,255,204,.18)"; S.bases.forEach(b=>{g.beginPath();g.arc(b.x*k,b.y*k,m.supplyRadius*k,0,6.2832);g.stroke();});
+  g.strokeStyle="#ff4455"; S.bases.forEach(b=>{if(b.cut) g.strokeRect(b.x*k-6,b.y*k-6,12,12);});
+  S.marches.forEach(mc=>{const t=MAP[mc.to],p=mc.t/mc.total; g.strokeStyle="#ffb020"; g.beginPath(); g.moveTo(mc.fx*k,mc.fy*k); g.lineTo(t.x*k,t.y*k); g.stroke();
+    g.fillStyle="#ffb020"; g.fillRect((mc.fx+(t.x-mc.fx)*p)*k-3,(mc.fy+(t.y-mc.fy)*p)*k-3,6,6);});
+  const t=MAP[S.target]; if(t){g.strokeStyle="#fff"; g.beginPath(); g.arc(t.x*k,t.y*k,8,0,6.2832); g.stroke();}
+}
+function skip(kind,key){ // Restzeit gegen Gold überspringen
+  let o,rem; const b=S.bases.find(x=>x.id==key);
+  if(kind==="job"){o=b.job;rem=o.total-o.t;} else if(kind==="queue"){o=b.queue[0];rem=o.total-o.t;} else {o=S.research[key];rem=RD(key).timeS-o.prog;}
+  const c=skipCost(rem); if((S.res.gold||0)<c) return toast(`Skip kostet ${c} Gold`);
+  S.res.gold-=c; if(kind==="res") o.prog=RD(key).timeS; else o.t=o.total; tick(0); render();
+}
+function applyCfg(){
+  if(!PLAYER.isAdmin) return;
+  const msg=document.getElementById("cfgmsg"); let c;
+  try{c=JSON.parse(document.getElementById("cfg").value);}catch(e){msg.textContent="JSON-Fehler: "+e.message;return;}
+  const err=validate(c); if(err.length){msg.textContent=err.join(" | ");return;}
+  CFG=c; syncCfg(); try{localStorage.setItem("strategie_cfg_v3",JSON.stringify(c));}catch(e){}
+  msg.textContent="Übernommen – gilt sofort."; toast("Config live übernommen");
+}
+function resetCfg(){if(!PLAYER.isAdmin) return;CFG=structuredClone(DEFAULT_CONFIG);try{localStorage.removeItem("strategie_cfg_v3");}catch(e){} syncCfg(); render();}
+
+/* =====================================================================
+   7. ANZEIGE (Tabs werden nur bei Aktionen neu gezeichnet, nicht pro Tick)
+   ===================================================================== */
+const chips=()=>`<div class="chips">`+S.bases.map((b,i)=>`<div class="chip ${i==S.sel?"on":""}" onclick="S.sel=${i};render()">#${b.id} ${bn(b)}</div>`).join("")+`</div>`;
+const effText=bd=>{const p=bd.perLevel||{};return [p.energy&&`+${p.energy} Energie`,p.mil&&`+${p.mil} Militär`,p.def&&`+${p.def} Verteidigung`,...Object.entries(p.boost||{}).map(([r,v])=>`+${Math.round(v*100)}% ${rn(r)}`)].filter(Boolean).join(", ")+" pro Stufe";};
+const progBlock=(key,label,btn)=>`<div class="card"><b>${label}</b><div class="pb"><i data-p="${key}"></i></div><span data-r="${key}"></span> ${btn}</div>`;
+
+function viewBases(){
+  const n=S.bases.length,f=empireFactor(),b=B();
+  let h=`<div class="mut">${n} Basen · Ertrag pro Basis ${(f*100).toFixed(0)} % · Gesamt ≙ ${(n*f).toFixed(1)} volle Basen</div>`+chips();
+  if(b.job) h+=progBlock("job:"+b.id,`Im Bau: ${CFG.buildings[b.job.id].name} → Stufe ${(b.lvl[b.job.id]||0)+1}`,`<button class="gold" onclick="skip('job',${b.id})">Skip</button>`);
+  for(const id in CFG.buildings){
+    const bd=CFG.buildings[id],l=b.lvl[id]||0;
+    h+=`<div class="card"><b>${bd.name}</b> Stufe ${l}/${bd.max}<div class="mut">${effText(bd)}<br>Nächste Stufe: ${costStr(lvlCost(bd,l))} · ${fmt(lvlTime(bd,l))}${gateLock(bd,l)}</div><button ${l>=bd.max||b.job?"disabled":""} onclick="build('${id}')">Ausbauen</button></div>`;
+  }
+  return h;
+}
+function viewResearch(){
+  const list=[...Object.entries(CFG.units),...Object.entries(CFG.techs||{})].sort((a,b)=>a[1].year-b[1].year);
+  return `<div class="mut">Chronologischer Baum 1910–2000 · eine Forschung gleichzeitig</div>`+list.map(([id,u])=>{
+    const r=S.research[id],rd=u.research,ok=reqOk(rd); let st;
+    if(r.done) st=`<span class="acc">✔ erforscht</span>`;
+    else if(r.active) st=`<div class="pb"><i data-p="res:${id}"></i></div><span data-r="res:${id}"></span> <button class="gold" onclick="skip('res','${id}')">Skip</button>`;
+    else st=ok?`<button onclick="research('${id}')">Erforschen</button>`:`<span class="mut">🔒 braucht: ${rd.requires.map(x=>x==="*"?"alle Einheiten-Forschungen":NM(x)).join(", ")}</span>`;
+    return `<div class="card"><b>${u.year} · ${u.name}</b><div class="mut">Kosten ${costStr(rd.cost)} · Dauer ${fmt(rd.timeS)}</div>${st}</div>`;
+  }).join("");
+}
+function viewUnits(){
+  const b=B(),al=allowedTags(b);
+  let h=`<div class="mut">Gewählte Basis baut: ${[...al].join(", ")||"–"}</div>`+chips();
+  if(b.queue.length) h+=progBlock("q:"+b.id,`Produktion: ${b.queue.map(q=>CFG.units[q.id]?.name).join(" → ")}`,`<button class="gold" onclick="skip('queue',${b.id})">Skip</button>`);
+  const done=Object.entries(CFG.units).filter(([id])=>S.research[id]?.done);
+  if(!done.length) return h+`<div class="card">Noch nichts erforscht. Starte im Tab „Forschung“.</div>`;
+  return h+done.map(([id,u])=>{
+    const ok=al.has(u.tag), bon=Object.entries(u.bonus||{}).map(([k,v])=>`${CFG.targets[k]||k} ×${v}`).join(" · ");
+    return `<div class="card"><b>${u.name}</b> <span class="mut">(besitzt ${S.units[id]})</span>
+     <div class="mut">HP ${u.hp} · DMG ${u.dmg} · Reichweite ${u.range} · Sicht ${u.vision} · Cooldown ${u.cooldownS}s · Sprit ${u.fuel}/Feld · Energie ${u.energy} · Militär ${u.mil}<br>Bonus: ${bon}<br>Kosten: ${costStr(u.cost)} · ${fmt(u.timeS)}</div>
+     ${ok?`<button onclick="recruit('${id}')">Rekrutieren</button>`:`<span class="mut">✖ Basistyp kann „${u.tag}“ nicht bauen</span>`}</div>`;
+  }).join("");
+}
+function viewAdmin(){
+  return `<div class="mut">Komplette Config als JSON. „Live übernehmen“ wirkt sofort ohne Reload und wird im Browser gespeichert. Neue Einheit = Block in „units“ kopieren.</div>
+  <textarea id="cfg" spellcheck="false">${esc(JSON.stringify(CFG,null,1))}</textarea>
+  <button onclick="applyCfg()">Live übernehmen</button><button onclick="resetCfg()">Auf Standard</button><div id="cfgmsg" class="mut"></div>`;
+}
+
+function viewMap(){
+  const m=CFG.rules.map,t=MAP[S.target];
+  let h=`<div class="mut">${S.bases.length} Basen · ${S.bases.filter(x=>x.cut).length} abgeschnitten (−${Math.round(m.supplyLinePenalty*100)}% Ertrag) · Neulingsbasen ${S.conquered}/${m.maxNewbieConquests}</div>${chips()}
+  <canvas id="map" width="700" height="700" onclick="pickBase(event)" onmousemove="mapMove(event)" style="width:100%;aspect-ratio:1;border:1px solid var(--line);margin-top:6px"></canvas>
+  <div class="mut" id="mapstat" style="text-align:right;margin-bottom:6px">${m.serverId} MAP ${String(S.mapNo).padStart(3,"0")} · ${MAP.length} Basen</div>
+  ${S.newMapReady?`<div class="card"><b>Neue Karte freigeschaltet</b><br><button onclick="newMap()">Neue Karte betreten</button></div>`:""}
+  <div class="mut">Grün: du · Blau: Verbündete · Violett: Feinde · Braun: neutral · Rot: Neulingsbasis · Orange: Drohnenbasis · blaue Linien: Flüsse · graue Linien: Straßen · gelbe Quadrate: Gates · rotes Quadrat: abgeschnitten · Start = gewählte Basis</div>`;
+  if(t){
+    const err=canConquer(t),have=Object.keys(CFG.units).filter(id=>S.units[id]>0);
+    h+=`<div class="card"><b>Ziel #${t.id}</b> ${t.types.map(x=>CFG.baseTypes[x]?.name||x).join(" + ")} · ${t.owner==="p1"?"deins":t.owner==="neutral"?(t.newbie?"neutral (Neulingsbasis)":"neutral"):t.owner==="ally"?"verbündet":"feindlich – Besatzung "+Object.entries(garrison(t).units).map(([i,n])=>n+"× "+NM(i)).join(", ")+", Basis-HP "+garrison(t).hp}`;
+    if(err) h+=`<div class="mut">${err}</div>`;
+    else if(!have.length) h+=`<div class="mut">Keine Einheiten verfügbar – erst erforschen und rekrutieren.</div>`;
+    else h+=have.map(id=>`<div>${CFG.units[id].name} (${S.units[id]}) <input type="number" min="0" max="${S.units[id]}" value="${S.send[id]||0}" style="width:70px" onchange="onSend('${id}',this.value)"></div>`).join("")+`<div class="mut" id="sendinfo"></div><button onclick="dispatch()">Entsenden &amp; erobern</button>`;
+    h+=`</div>`;
+  }
+  return h+S.marches.map(mc=>progBlock("m:"+mc.id,`Marsch → #${mc.to} (${Object.entries(mc.units).map(([i,n])=>n+"× "+CFG.units[i].name).join(", ")})`,"")).join("");
+}
+const bar=document.getElementById("bar"),view=document.getElementById("view");
+function render(){
+  S.dirty=false;
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.t===S.tab));
+  view.innerHTML={bases:viewBases,research:viewResearch,units:viewUnits,map:viewMap,admin:viewAdmin}[S.tab]();
+  document.querySelector('[data-t="admin"]').style.display=PLAYER.isAdmin?"":"none";
+  updProg(); if(S.tab==="map"){drawMap();updSend();}
+}
+const go=t=>{if(t==="admin"&&!PLAYER.isAdmin)return; S.tab=t;render();};
+function updBar(){
+  const us=usage();
+  bar.innerHTML=Object.keys(CFG.resources).map(r=>`<span>${rn(r)} <b>${Math.floor(S.res[r]||0)}</b></span>`).join("")+
+   `<span>Energie <b>${us.e}/${sumEffect("energy")}</b></span><span>Militär <b>${us.m}/${sumEffect("mil")}</b></span>`+
+   (S.droneAt!==null&&!S.newMapReady?`<span>🗺 neue Karte in <b>${fmt(Math.max(0,CFG.rules.map.droneSpawnDelayH*3600-(S.clock-S.droneAt)))}</b></span>`:"");
+}
+function prog(key){
+  const [k,id]=key.split(":");
+  if(k==="job"){const j=S.bases.find(b=>b.id==id)?.job; return j?[j.t,j.total]:null;}
+  if(k==="m"){const m=S.marches.find(x=>x.id==id); return m?[m.t,m.total]:null;}
+  if(k==="q"){const q=S.bases.find(b=>b.id==id)?.queue[0]; return q?[q.t,q.total]:null;}
+  const r=S.research[id],d=RD(id); return r&&d?[r.prog,d.timeS]:null;
+}
+function updProg(){
+  document.querySelectorAll("[data-p]").forEach(e=>{
+    const p=prog(e.dataset.p); if(!p) return;
+    e.style.width=Math.min(100,p[0]/p[1]*100)+"%";
+    const t=document.querySelector(`[data-r="${e.dataset.p}"]`); if(t) t.textContent=fmt(p[1]-p[0]);
+  });
+}
+
+/* =====================================================================
+   8. GAME LOOP – setInterval statt requestAnimationFrame, läuft auch im Hintergrund-Tab.
+   dt = echte Zeit seit letztem Durchlauf (max. 1 h Aufholzeit) × gameSpeed.
+   ===================================================================== */
+let last=Date.now();
+setInterval(()=>{
+  const now=Date.now(), dt=Math.min(3600,(now-last)/1000)*CFG.rules.gameSpeed; last=now;
+  tick(dt); updBar();
+  if(S.dirty&&S.tab!=="admin") render(); else {updProg(); if(S.tab==="map") drawMap();}
+},250);
+render(); updBar();
+</script></body></html>
